@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+#
+# Bash script for provisioning the Kubernetes single instance funcional 
+#create by David Rodriguez
+
+
+set -e
+set -x
+
+
+function config(){
+  export CLIENT_IP_ADDR=`ifconfig  | grep 'inet addr:'| grep -v '127.0.0.1' | cut -d: -f2 | awk '{ print $1}' | tail -1`
+  export CLIENT_FQDN=`hostname`
+  export CLIENT_NAME=`hostname | cut -d. -f 1 | tr '[:upper:]' '[:lower:]'`
+  echo "Configuring /etc/hosts ..."
+  echo "127.0.0.1 localhost localhost.localdomain localhost4 localhost4.localdomain4" > /etc/hosts
+  echo "::1       localhost localhost.localdomain localhost6 localhost6.localdomain6" >> /etc/hosts
+  echo "$CLIENT_IP_ADDR    $CLIENT_FQDN $CLIENT_NAME" >> /etc/hosts
+}
+function configuser(){
+    sudo su
+  # kubelet requires swap off
+  swapoff -a
+  # keep swap off after reboot
+  sudo sed -i "/ swap / s/^\(.*\)$/#\1/g" /etc/fstab
+
+  # sed -i '/ExecStart=/a Environment="KUBELET_EXTRA_ARGS=--cgroup-driver=cgroupfs"' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+  sed -i "0,/ExecStart=/s//Environment="KUBELET_EXTRA_ARGS=--cgroup-driver=cgroupfs"\n&/" /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+  # Get the IP address that VirtualBox has given this VM
+  IPADDR=`ifconfig eth0 | grep Mask | awk '{print $2}'| cut -f2 -d:`
+  echo This VM has IP address $IPADDR
+}
+
+
+function install_k8s(){
+  #  echo "Install Kubernetes"
+  # This script to install Kubernetes will get executed after we have provisioned the box 
+
+  # Install kubernetes
+apt-get update && apt-get install -y apt-transport-https
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
+deb http://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+apt-get update
+apt-get install -y kubelet kubeadm kubectl
+
+
+  echo "Done installing Kubernetes"
+}
+
+function testupk8s(){
+  # Set up Kubernetes
+  NODENAME=$(hostname -s)
+  #test functional init 
+  kubeadm init --apiserver-cert-extra-sans=$IPADDR  --node-name $NODENAME --pod-network-cidr="192.168.0.0/16" --ignore-preflight-errors=all --dry-run
+}
+
+function upk8s(){
+  # Set up Kubernetes
+  NODENAME=$(hostname -s)
+
+  kubeadm init --apiserver-cert-extra-sans=$IPADDR  --node-name $NODENAME --pod-network-cidr="192.168.0.0/16" --ignore-preflight-errors=all
+}
+
+
+function user_setup(){
+
+  echo "Set LC_ALL=C to .profile"
+  sudo echo "export LC_ALL=C" >> /home/vagrant/.profile
+
+  # Set up admin creds for the vagrant user
+  echo Copying credentials to /home/vagrant...
+  sudo --user=vagrant mkdir -p /home/vagrant/.kube
+  cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+  chown $(id -u vagrant):$(id -g vagrant) /home/vagrant/.kube/config
+}
+
+
+function k8snetworkready(){
+  #Requirements
+  #AMD64 processor
+  #2CPU
+  #2GB RAM
+  #10GB free disk space
+  #RedHat Enterprise Linux 7.x+, CentOS 7.x+, Ubuntu 16.04+, or Debian 8.x+
+  #Before you begin
+  #Follow the Kubernetes instructions to install kubeadm.
+  #
+  #Note: After installing kubeadm, do not power down or restart the host. Instead, continue directly to the next section to create your cluster.
+  #
+  #Create a single-host Kubernetes cluster
+  mkdir -p $HOME/.kube
+  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+  #Install an etcd instance with the following command.
+  kubectl apply -f \
+  https://docs.projectcalico.org/v3.2/getting-started/kubernetes/installation/hosted/etcd.yaml
+  #Install the RBAC roles required for Calico
+
+  kubectl apply -f \
+  https://docs.projectcalico.org/v3.2/getting-started/kubernetes/installation/rbac.yaml
+
+  #Install Calico with the following command.
+  kubectl apply -f \
+  https://docs.projectcalico.org/v3.2/getting-started/kubernetes/installation/hosted/calico.yaml
+
+  sleep 2m
+
+  kubectl get pods --all-namespaces
+
+  #Remove the taints on the master so that you can schedule pods on it.
+
+  kubectl taint nodes --all node-role.kubernetes.io/master-
+
+  #Confirm that you now have a node in your cluster with the following command.
+
+  kubectl get nodes -o wide
+
+  #It should return something like the following.
+
+  #NAME             STATUS  ROLES   AGE  VERSION  EXTERNAL-IP  OS-IMAGE            KERNEL-VERSION     CONTAINER-RUNTIME
+  #<your-hostname>  Ready   master  1h   v1.8.x   <none>       Ubuntu 16.04.3 LTS  4.10.0-28-generic  docker://1.12.6
+  
+  #Congratulations! You now have a single-host Kubernetes cluster equipped with Calico
+
+
+}
+
+#function update_repo(){
+
+#}
+
+function generate_validator() {
+  echo "#!/bin/bash
+        echo -n 'm036 rocks' | openssl sha256 | sed -e s/\(stdin\)=.//" > /usr/local/bin/validate_box.bash
+  chmod +x /usr/local/bin/validate_box.bash
+}
+
+config
+install_k8s
+configuser
+testupk8s
+upk8s
+user_setup
+k8snetworkready
+#data_path
+generate_validator
+echo "DONE"
